@@ -6,14 +6,11 @@ import re
 import sys
 
 import requests
-from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
 today = datetime.date.today() + datetime.timedelta(days=3)
-
-load_dotenv()
 
 ntfy_key = os.getenv("NTFY_KEY")
 username = os.getenv("USERNAME")
@@ -46,6 +43,9 @@ s = requests.Session()
 for cookie in cookies:
     s.cookies.set(cookie["name"], cookie["value"])
 
+# Close the browser
+driver.quit()
+
 headers = {
     "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -69,7 +69,6 @@ if response.status_code != 200:
     print("Error: Could not get calendar data")
     print(response.status_code)
     print(response.text)
-    driver.quit()
     sys.exit()
 
 data = response.json()  # Parse JSON data
@@ -100,5 +99,3 @@ for item in class_and_rooms:
         ),
         timeout=10,
     )
-
-driver.quit()
