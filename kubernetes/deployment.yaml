@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: celcat-scraper-cronjob
+spec:
+  schedule: "* * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: celcat-scraper
+            image: ghcr.io/watt3r/celcat-scraper:latest
+            envFrom:
+              - secretRef:
+                  name: celcat-scraper-secrets
+            imagePullPolicy: "Always"
+          imagePullSecrets:
+            - name: github-container-registry
+          restartPolicy: OnFailure
