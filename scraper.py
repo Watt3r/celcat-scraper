@@ -3,172 +3,119 @@
 import datetime
 import os
 import re
-import sys
-import time
-from typing import Dict, List, NamedTuple, Optional
-
 import requests
-from requests.exceptions import JSONDecodeError, RequestException
+import time
+from typing import Dict, List, NamedTuple
+from requests.exceptions import HTTPError, Timeout
 from selenium import webdriver
-from selenium.common.exceptions import NoSuchElementException, WebDriverException
-from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from statsd import StatsClient
 
-# Set up statsd client
-statsd = StatsClient(
-    os.getenv("STATSD_SERVER", "localhost"), 8125, prefix="celcat_scraper"
-)
+# Configuration
+STATSD_SERVER = os.getenv("STATSD_SERVER", "localhost")
+statsd = StatsClient(STATSD_SERVER, 8125, prefix="celcat_scraper")
 
 
 class ClassInfo(NamedTuple):
-    """
-    Represents the information about a class and its associated rooms.
-    """
-
-    class_name: str
+    name: str
     rooms: List[str]
 
 
 def measure_time(func):
-    """
-    Decorator to measure execution time of a function.
-    Sends the timing metric to StatsD.
-    """
-
     def wrapper(*args, **kwargs):
-        start = time.time()
+        start_time = time.time()
         result = func(*args, **kwargs)
-        elapsed = time.time() - start
-        statsd.timing(f"{func.__name__}.time", elapsed)
+        elapsed_time = time.time() - start_time
+        statsd.timing(f"{func.__name__}.time", elapsed_time)
         return result
 
     return wrapper
 
 
 @measure_time
-def login_to_website(driver: WebDriver, username: str, password: str) -> None:
-    """
-    Logs into the website using Selenium.
-    """
+def login(driver: webdriver.Chrome, username: str, password: str):
     try:
         driver.get("https://timetable.nulondon.ac.uk/cal?vt=month")
         driver.find_element(By.ID, "Name").send_keys(username)
         driver.find_element(By.ID, "Password").send_keys(password)
         driver.find_element(By.ID, "Password").send_keys(Keys.RETURN)
         statsd.incr("login.success")
-    except NoSuchElementException as err:
+    except NoSuchElementException:
         statsd.incr("login.failure")
-        raise err
+        raise
 
 
 @measure_time
 def fetch_calendar_data(
-    session: requests.Session, headers: Dict[str, str], person: Dict[str, str]
-) -> Optional[List[Dict[str, str]]]:
-    """
-    Fetches calendar data for a given person and date.
-    """
+    session: requests.Session, headers: Dict[str, str], person_id: str
+):
     today = datetime.date.today()
-
+    endpoint = "https://timetable.nulondon.ac.uk/Home/GetCalendarData"
     data = {
         "start": today,
         "end": today,
         "resType": "104",
         "calView": "month",
-        "federationIds[]": person["fedId"],
+        "federationIds[]": person_id,
     }
 
     try:
-        response = session.post(
-            "https://timetable.nulondon.ac.uk/Home/GetCalendarData",
-            headers=headers,
-            data=data,
-        )
-    except RequestException as err:
+        response = session.post(endpoint, headers=headers, data=data)
+        response.raise_for_status()
+        return response.json()
+    except (HTTPError, Timeout) as err:
         statsd.incr("fetch_calendar_data.failure")
         raise err
 
-    if response.status_code != 200:
-        statsd.incr("fetch_calendar_data.failure")
-        return None
-
-    try:
-        json_data = response.json()
-    except JSONDecodeError:
-        statsd.incr("fetch_calendar_data.invalid_json")
-        return None
-
-    statsd.incr("fetch_calendar_data.success")
-    return json_data
-
 
 @measure_time
-def extract_class_and_rooms(data: List[Dict[str, str]]) -> List[ClassInfo]:
-    """
-    Extracts class and room information from calendar data.
-    """
-    class_and_rooms = []
+def extract_class_and_rooms(calendar_data: List[Dict[str, str]]):
+    class_info = []
     room_regex = re.compile(r"\d+\s\[[\d\sCap]+\]")
 
-    for entry in data:
-        description = entry["description"]
-        class_name = description.split("_")[0]
-        rooms = room_regex.findall(description)
+    for entry in calendar_data:
+        class_name, *rest = entry["description"].split("_")
+        rooms = room_regex.findall(entry["description"])
+        class_info.append(ClassInfo(class_name, rooms))
 
-        class_and_rooms.append(ClassInfo(class_name, rooms))
-
-    return class_and_rooms
+    return class_info
 
 
 @measure_time
-def send_notifications(
-    classes: List[ClassInfo], ntfy_key: str, person: Dict[str, str]
-) -> None:
-    """
-    Sends notifications for each class and room combination.
-    """
-    for item in classes:
+def send_notifications(classes: List[ClassInfo], ntfy_key: str, person_name: str):
+    endpoint = f"https://ntfy.sh/{ntfy_key}-{person_name}"
+    for class_info in classes:
+        message = f"Class: {class_info.name}, Rooms: {', '.join(class_info.rooms)}"
         try:
-            requests.post(
-                f"https://ntfy.sh/{ntfy_key}-{person['name']}",
-                data=f"Class: {item.class_name}, Rooms: {', '.join(item.rooms)}".encode(
-                    encoding="utf-8"
-                ),
-                timeout=10,
-            )
+            requests.post(endpoint, data=message.encode("utf-8"), timeout=10)
             statsd.incr("notification.sent")
-        except RequestException as err:
+        except Timeout as err:
             statsd.incr("notification.failure")
             raise err
 
 
 def main():
-    """
-    Main function.
-    """
     try:
         ntfy_key = os.getenv("NTFY_KEY")
         username = os.getenv("USERNAME")
         password = os.getenv("PASSWORD")
 
-        chrome_options = webdriver.ChromeOptions()
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-dev-shm-usage")
+        options = webdriver.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--window-size=1920,1080")
+        options.add_argument("--headless")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-dev-shm-usage")
 
-        driver = webdriver.Chrome(options=chrome_options)
-        login_to_website(driver, username, password)
+        with webdriver.Chrome(options=options) as driver:
+            login(driver, username, password)
+            cookies = driver.get_cookies()
 
-        cookies = driver.get_cookies()
-        driver.quit()
-
-        s = requests.Session()
+        session = requests.Session()
         for cookie in cookies:
-            s.cookies.set(cookie["name"], cookie["value"])
+            session.cookies.set(cookie["name"], cookie["value"])
 
         headers = {
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
@@ -176,21 +123,15 @@ def main():
         }
 
         people = [
-            {
-                "name": "Lucas",
-                "fedId": "02267113",
-            },
-            {
-                "name": "Tanay",
-                "fedId": "02256085",
-            },
+            {"name": "Lucas", "fedId": "02267113"},
+            {"name": "Tanay", "fedId": "02256085"},
         ]
-
         for person in people:
-            data = fetch_calendar_data(s, headers, person)
-            if data:
-                classes = extract_class_and_rooms(data)
-                send_notifications(classes, ntfy_key, person)
+            if calendar_data := fetch_calendar_data(
+                session, headers, person["fedId"]
+            ):
+                classes = extract_class_and_rooms(calendar_data)
+                send_notifications(classes, ntfy_key, person["name"])
 
         statsd.incr("success")
     except Exception as err:
