@@ -1,4 +1,4 @@
-FROM python:3.9
+FROM python:3.11
 
 WORKDIR /usr/local/bin
 
@@ -11,7 +11,8 @@ RUN apt-get update \
 ENV DISPLAY=:99
 
 # Install Python dependencies
-RUN pip install requests selenium python-dotenv
+ADD requirements.txt .
+RUN pip install -r requirements.txt
 
 ADD scraper.py .
 
