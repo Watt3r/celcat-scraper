@@ -6,7 +6,7 @@ import re
 import requests
 import time
 from typing import Dict, List, NamedTuple
-from requests.exceptions import HTTPError, Timeout
+from requests.exceptions import HTTPError, Timeout, JSONDecodeError
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.common.by import By
@@ -65,7 +65,7 @@ def fetch_calendar_data(
         response = session.post(endpoint, headers=headers, data=data)
         response.raise_for_status()
         return response.json()
-    except (HTTPError, Timeout) as err:
+    except (HTTPError, Timeout, JSONDecodeError) as err:
         statsd.incr("fetch_calendar_data.failure")
         raise err
 
