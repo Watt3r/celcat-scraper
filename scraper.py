@@ -65,9 +65,12 @@ def fetch_calendar_data(
         response = session.post(endpoint, headers=headers, data=data)
         response.raise_for_status()
         return response.json()
-    except (HTTPError, Timeout, JSONDecodeError) as err:
+    except (HTTPError, Timeout) as err:
         statsd.incr("fetch_calendar_data.failure")
         raise err
+    except JSONDecodeError:
+        statsd.incr("fetch_calendar_data.json_decode_failure")
+        return []
 
 
 @measure_time
